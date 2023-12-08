@@ -28,6 +28,7 @@ import (
 )
 
 const packagerName = "deb"
+const gzipLevel = gzip.BestCompression
 
 // nolint: gochecknoinits
 func init() {
@@ -113,7 +114,7 @@ func (d *Deb) Package(info *nfpm.Info, deb io.Writer) (err error) { // nolint: f
 		return err
 	}
 
-	controlTarGz, err := createControl(instSize, md5sums, info)
+	controlTarGz, controlTarballName, err := createControl(instSize, md5sums, info)
 	if err != nil {
 		return err
 	}
@@ -129,12 +130,12 @@ func (d *Deb) Package(info *nfpm.Info, deb io.Writer) (err error) { // nolint: f
 		return fmt.Errorf("cannot pack debian-binary: %w", err)
 	}
 
-	if err := addArFile(w, "control.tar.gz", controlTarGz); err != nil {
-		return fmt.Errorf("cannot add control.tar.gz to deb: %w", err)
+	if err := addArFile(w, controlTarballName, controlTarGz); err != nil {
+		return fmt.Errorf("cannot add %s to deb: %w", controlTarballName, err)
 	}
 
 	if err := addArFile(w, dataTarballName, dataTarball); err != nil {
-		return fmt.Errorf("cannot add data.tar.gz to deb: %w", err)
+		return fmt.Errorf("cannot add %s to deb: %w", dataTarballName, err)
 	}
 
 	if info.Deb.Signature.KeyFile != "" || info.Deb.Signature.SignFn != nil {
@@ -435,6 +436,9 @@ func copyToTarAndDigest(file *files.Content, tw *tar.Writer, md5w io.Writer) (in
 	header.Name = files.AsExplicitRelativePath(file.Destination)
 	header.Uname = file.FileInfo.Owner
 	header.Gname = file.FileInfo.Group
+	header.ModTime = time.Unix(0, 0)
+	header.AccessTime = time.Unix(0, 0)
+	header.ChangeTime = time.Unix(0, 0)
 	if err := tw.WriteHeader(header); err != nil {
 		return 0, fmt.Errorf("cannot write header of %s to data.tar.gz: %w", file.Source, err)
 	}
@@ -537,21 +541,47 @@ func formatChangelog(info *nfpm.Info) (string, error) {
 }
 
 // nolint:funlen
-func createControl(instSize int64, md5sums []byte, info *nfpm.Info) (controlTarGz []byte, err error) {
-	var buf bytes.Buffer
-	compress := gzip.NewWriter(&buf)
-	out := tar.NewWriter(compress)
+func createControl(instSize int64, md5sums []byte, info *nfpm.Info) (controlTarGz []byte, name string, err error) {
+	var (
+		controlTarball            bytes.Buffer
+		controlTarballWriteCloser io.WriteCloser
+	)
+
+	switch info.Deb.Compression {
+	case "", "gzip": // the default for now
+		controlTarballWriteCloser, _ = gzip.NewWriterLevel(&controlTarball, gzipLevel)
+		name = "control.tar.gz"
+	case "xz":
+		controlTarballWriteCloser, err = xz.NewWriter(&controlTarball)
+		if err != nil {
+			return nil, "", err
+		}
+		name = "control.tar.xz"
+	case "zstd":
+		controlTarballWriteCloser, err = zstd.NewWriter(&controlTarball)
+		if err != nil {
+			return nil, "", err
+		}
+		name = "control.tar.zst"
+	case "none":
+		controlTarballWriteCloser = nopCloser{Writer: &controlTarball}
+		name = "control.tar"
+	default:
+		return nil, "", fmt.Errorf("unknown compression algorithm: %s", info.Deb.Compression)
+	}
+
+	out := tar.NewWriter(controlTarballWriteCloser)
 	// the writers are properly closed later, this is just in case that we have
 	// an error in another part of the code.
-	defer out.Close()      // nolint: errcheck
-	defer compress.Close() // nolint: errcheck
+	defer out.Close()                       // nolint: errcheck
+	defer controlTarballWriteCloser.Close() // nolint: errcheck
 
 	var body bytes.Buffer
 	if err = writeControl(&body, controlData{
 		Info:          info,
 		InstalledSize: instSize / 1024,
 	}); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	// ensure predefined sort order of these items
@@ -576,60 +606,72 @@ func createControl(instSize int64, md5sums []byte, info *nfpm.Info) (controlTarG
 	for idx, name := range filesToCreateNames {
 		content := filesToCreateContent[idx]
 		if err := newFileInsideTar(out, name, content); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 	}
 
 	type fileAndMode struct {
+		path     string
 		fileName string
 		mode     int64
 	}
 
-	specialFiles := map[string]*fileAndMode{}
-	specialFiles[info.Scripts.PreInstall] = &fileAndMode{
-		fileName: "preinst",
-		mode:     0o755,
-	}
-	specialFiles[info.Scripts.PostInstall] = &fileAndMode{
-		fileName: "postinst",
-		mode:     0o755,
-	}
-	specialFiles[info.Scripts.PreRemove] = &fileAndMode{
-		fileName: "prerm",
-		mode:     0o755,
-	}
-	specialFiles[info.Scripts.PostRemove] = &fileAndMode{
-		fileName: "postrm",
-		mode:     0o755,
-	}
-	specialFiles[info.Overridables.Deb.Scripts.Rules] = &fileAndMode{
-		fileName: "rules",
-		mode:     0o755,
-	}
-	specialFiles[info.Overridables.Deb.Scripts.Templates] = &fileAndMode{
-		fileName: "templates",
-		mode:     0o644,
-	}
-	specialFiles[info.Overridables.Deb.Scripts.Config] = &fileAndMode{
-		fileName: "config",
-		mode:     0o755,
+	// converted from map[string] to slice to have predictable sort order;
+	// when using map[string] it was random sort order and tar archive had
+	// different content and gzip had different size because of that.
+	specialFiles := []*fileAndMode{
+		{
+			path:     info.Scripts.PreInstall,
+			fileName: "preinst",
+			mode:     0o755,
+		},
+		{
+			path:     info.Scripts.PostInstall,
+			fileName: "postinst",
+			mode:     0o755,
+		},
+		{
+			path:     info.Scripts.PreRemove,
+			fileName: "prerm",
+			mode:     0o755,
+		},
+		{
+			path:     info.Scripts.PostRemove,
+			fileName: "postrm",
+			mode:     0o755,
+		},
+		{
+			path:     info.Overridables.Deb.Scripts.Rules,
+			fileName: "rules",
+			mode:     0o755,
+		},
+		{
+			path:     info.Overridables.Deb.Scripts.Templates,
+			fileName: "templates",
+			mode:     0o644,
+		},
+		{
+			path:     info.Overridables.Deb.Scripts.Config,
+			fileName: "config",
+			mode:     0o755,
+		},
 	}
 
-	for path, destMode := range specialFiles {
-		if path != "" {
-			if err := newFilePathInsideTar(out, path, destMode.fileName, destMode.mode); err != nil {
-				return nil, err
+	for _, item := range specialFiles {
+		if item.path != "" {
+			if err := newFilePathInsideTar(out, item.path, item.fileName, item.mode); err != nil {
+				return nil, "", err
 			}
 		}
 	}
 
 	if err := out.Close(); err != nil {
-		return nil, fmt.Errorf("closing control.tar.gz: %w", err)
+		return nil, "", fmt.Errorf("closing control.tar.gz: %w", err)
 	}
-	if err := compress.Close(); err != nil {
-		return nil, fmt.Errorf("closing control.tar.gz: %w", err)
+	if err := controlTarballWriteCloser.Close(); err != nil {
+		return nil, "", fmt.Errorf("closing control.tar.gz: %w", err)
 	}
-	return buf.Bytes(), nil
+	return controlTarball.Bytes(), name, nil
 }
 
 func newItemInsideTar(out *tar.Writer, content []byte, header *tar.Header) error {
@@ -663,12 +705,14 @@ func newFilePathInsideTar(out *tar.Writer, path, dest string, mode int64) error 
 		return err
 	}
 	return newItemInsideTar(out, content, &tar.Header{
-		Name:     files.AsExplicitRelativePath(dest),
-		Size:     int64(len(content)),
-		Mode:     mode,
-		ModTime:  time.Unix(0, 0),
-		Typeflag: tar.TypeReg,
-		Format:   tar.FormatGNU,
+		Name:       files.AsExplicitRelativePath(dest),
+		Size:       int64(len(content)),
+		Mode:       mode,
+		ModTime:    time.Unix(0, 0),
+		AccessTime: time.Unix(0, 0),
+		ChangeTime: time.Unix(0, 0),
+		Typeflag:   tar.TypeReg,
+		Format:     tar.FormatGNU,
 	})
 }
 
