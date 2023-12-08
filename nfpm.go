@@ -135,6 +135,9 @@ func (c *Config) Get(format string) (info *Info, err error) {
 		return nil, fmt.Errorf("failed to merge overrides into info: %w", err)
 	}
 
+	// copy MTime from config
+	info.MTime = c.MTime
+
 	var contents []*files.Content
 	for _, f := range info.Contents {
 		if f.Packager == format || f.Packager == "" {

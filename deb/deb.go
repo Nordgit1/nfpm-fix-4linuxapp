@@ -436,6 +436,7 @@ func copyToTarAndDigest(file *files.Content, tw *tar.Writer, md5w io.Writer) (in
 	header.Name = files.AsExplicitRelativePath(file.Destination)
 	header.Uname = file.FileInfo.Owner
 	header.Gname = file.FileInfo.Group
+	header.ModTime = time.Unix(0, 0)
 	if err := tw.WriteHeader(header); err != nil {
 		return 0, fmt.Errorf("cannot write header of %s to data.tar.gz: %w", file.Source, err)
 	}
@@ -647,7 +648,7 @@ func newFileInsideTar(out *tar.Writer, name string, content []byte, modtime time
 		Name:     files.AsExplicitRelativePath(name),
 		Size:     int64(len(content)),
 		Mode:     0o644,
-		ModTime:  modtime,
+		ModTime:  time.Unix(0, 0),
 		Typeflag: tar.TypeReg,
 		Format:   tar.FormatGNU,
 	})
@@ -666,7 +667,7 @@ func newFilePathInsideTar(out *tar.Writer, path, dest string, mode int64, modtim
 		Name:     files.AsExplicitRelativePath(dest),
 		Size:     int64(len(content)),
 		Mode:     mode,
-		ModTime:  modtime,
+		ModTime:  time.Unix(0, 0),
 		Typeflag: tar.TypeReg,
 		Format:   tar.FormatGNU,
 	})
