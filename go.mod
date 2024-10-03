@@ -6,8 +6,8 @@ require (
 	dario.cat/mergo v1.0.0
 	github.com/AlekSi/pointer v1.2.0
 	github.com/Masterminds/semver/v3 v3.2.1
-	github.com/ProtonMail/go-crypto v0.0.0-20230626094100-7e9e0395ebec
-	github.com/ProtonMail/gopenpgp/v2 v2.7.1
+	github.com/ProtonMail/go-crypto v0.0.0-20230717121422-5aa5874ade95
+	github.com/ProtonMail/gopenpgp/v2 v2.7.5
 	github.com/blakesmith/ar v0.0.0-20190502131153-809d4375e1fb
 	github.com/caarlos0/go-rpmutils v0.2.1-0.20211112020245-2cd62ff89b11
 	github.com/caarlos0/go-version v0.1.1
